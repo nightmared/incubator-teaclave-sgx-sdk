@@ -17,19 +17,19 @@
 
 #[cfg(feature = "backtrace")]
 use crate::backtrace::Backtrace;
+use alloc_crate::borrow::Cow;
+use alloc_crate::boxed::Box;
+use alloc_crate::collections;
+use alloc_crate::str;
+use alloc_crate::string::{self, String};
 use core::alloc::{AllocError, LayoutErr};
-use core::array;
 use core::any::TypeId;
+use core::array;
 use core::cell;
 use core::char;
 use core::fmt::{self, Debug, Display};
 use core::mem::transmute;
 use core::num;
-use alloc_crate::str;
-use alloc_crate::string::{self, String};
-use alloc_crate::boxed::Box;
-use alloc_crate::borrow::Cow;
-use alloc_crate::collections;
 
 /// `Error` is a trait representing the basic expectations for error values,
 /// i.e., values of type `E` in [`Result<T, E>`]. Errors must describe
@@ -47,7 +47,7 @@ use alloc_crate::collections;
 /// [`Display`]: ../fmt/trait.Display.html
 /// [`Debug`]: ../fmt/trait.Debug.html
 /// [`source`]: trait.Error.html#method.source
-pub trait Error: Debug + Display {
+pub trait Error: Display {
     /// The lower-level source of this error, if any.
     ///
     fn source(&self) -> Option<&(dyn Error + 'static)> {
@@ -94,7 +94,6 @@ pub trait Error: Debug + Display {
 mod private {
     // This is a hack to prevent `type_id` from being overridden by `Error`
     // implementations, since that can enable unsound downcasting.
-    #[derive(Debug)]
     pub struct Internal;
 }
 
@@ -422,7 +421,9 @@ impl dyn Error {
     ///
     #[inline]
     pub fn chain(&self) -> Chain<'_> {
-        Chain { current: Some(self) }
+        Chain {
+            current: Some(self),
+        }
     }
 
     /// Returns an iterator starting with the current error and continuing with
@@ -452,7 +453,7 @@ impl dyn Error {
 /// its sources, use `skip(1)`.
 ///
 /// [`Error`]: trait.Error.html
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Chain<'a> {
     current: Option<&'a (dyn Error + 'static)>,
 }
@@ -470,7 +471,7 @@ impl<'a> Iterator for Chain<'a> {
 /// An iterator over an [`Error`] and its sources.
 ///
 /// [`Error`]: trait.Error.html
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct ErrorIter<'a> {
     current: Option<&'a (dyn Error + 'static)>,
 }
@@ -508,4 +509,3 @@ impl dyn Error + Send + Sync {
         })
     }
 }
-

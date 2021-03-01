@@ -53,9 +53,12 @@ pub use core::prelude::v1::{
 #[allow(deprecated)]
 #[doc(hidden)]
 pub use core::prelude::v1::{
-    global_allocator, test, test_case, Clone, Copy, Debug, Default, Eq, Hash, Ord,
-    PartialEq, PartialOrd, RustcDecodable, RustcEncodable,
+    global_allocator, test, test_case, Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq,
+    PartialOrd, RustcDecodable, RustcEncodable,
 };
+
+#[doc(no_inline)]
+pub use core::prelude::v1::derive;
 
 #[doc(hidden)]
 pub use core::prelude::v1::cfg_accessible;

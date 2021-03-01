@@ -15,15 +15,14 @@
 // specific language governing permissions and limitations
 // under the License..
 
-use sgx_types::sgx_status_t;
 use crate::error;
 use crate::sys;
+use alloc_crate::boxed::Box;
+use alloc_crate::str;
+use core::convert::From;
 use core::fmt;
 use core::result;
-use core::convert::From;
-use alloc_crate::str;
-use alloc_crate::boxed::Box;
-
+use sgx_types::sgx_status_t;
 
 /// A specialized [`Result`](../result/enum.Result.html) type for I/O
 /// operations.
@@ -67,7 +66,6 @@ enum Repr {
     SgxStatus(sgx_status_t),
 }
 
-#[derive(Debug)]
 struct Custom {
     kind: ErrorKind,
     error: Box<dyn error::Error + Send + Sync>,
@@ -188,14 +186,18 @@ impl From<ErrorKind> for Error {
     ///
     #[inline]
     fn from(kind: ErrorKind) -> Error {
-        Error { repr: Repr::Simple(kind) }
+        Error {
+            repr: Repr::Simple(kind),
+        }
     }
 }
 
 impl From<sgx_status_t> for Error {
     #[inline]
     fn from(status: sgx_status_t) -> Error {
-        Error { repr: Repr::SgxStatus(status) }
+        Error {
+            repr: Repr::SgxStatus(status),
+        }
     }
 }
 
@@ -215,7 +217,9 @@ impl Error {
     }
 
     fn _new(kind: ErrorKind, error: Box<dyn error::Error + Send + Sync>) -> Error {
-        Error { repr: Repr::Custom(Box::new(Custom { kind, error })) }
+        Error {
+            repr: Repr::Custom(Box::new(Custom { kind, error })),
+        }
     }
 
     /// Returns an error representing the last OS error which occurred.
@@ -231,7 +235,9 @@ impl Error {
     /// Creates a new instance of an `Error` from a particular OS error code.
     ///
     pub fn from_raw_os_error(code: i32) -> Error {
-        Error { repr: Repr::Os(code) }
+        Error {
+            repr: Repr::Os(code),
+        }
     }
 
     /// Returns the OS error that this error represents (if any).
@@ -252,7 +258,9 @@ impl Error {
     /// Creates a new instance of an `Error` from a particular SGX error status.
     ///
     pub fn from_sgx_error(status: sgx_status_t) -> Error {
-        Error { repr: Repr::SgxStatus(status) }
+        Error {
+            repr: Repr::SgxStatus(status),
+        }
     }
 
     /// Returns the SGX error that this error represents (if any).
@@ -275,7 +283,7 @@ impl Error {
     /// If this `Error` was constructed via `new` then this function will
     /// return `Some`, otherwise it will return `None`.
     ///
-    pub fn get_ref(&self) -> Option<&(dyn error::Error+Send+Sync+'static)> {
+    pub fn get_ref(&self) -> Option<&(dyn error::Error + Send + Sync + 'static)> {
         match self.repr {
             Repr::Os(..) => None,
             Repr::Simple(..) => None,
@@ -334,7 +342,11 @@ impl fmt::Debug for Repr {
                 .field("kind", &sys::decode_error_kind(code))
                 .field("message", &sys::os::error_string(code))
                 .finish(),
-            Repr::Custom(ref c) => fmt::Debug::fmt(&c, fmt),
+            Repr::Custom(ref c) => fmt
+                .debug_struct("Custom")
+                .field("kind", &c.kind)
+                .field("error", &c.error.to_string())
+                .finish(),
             Repr::Simple(kind) => fmt.debug_tuple("Kind").field(&kind).finish(),
             Repr::SgxStatus(status) => fmt
                 .debug_struct("Sgx")
@@ -392,7 +404,7 @@ impl error::Error for Error {
 }
 
 fn _assert_error_is_sync_send() {
-    fn _is_sync_send<T: Sync+Send>() {}
+    fn _is_sync_send<T: Sync + Send>() {}
     _is_sync_send::<Error>();
 }
 

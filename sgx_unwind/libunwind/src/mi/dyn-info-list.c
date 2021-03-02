@@ -25,7 +25,11 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
 
 #include "libunwind_i.h"
 
+#if defined(__GNUC__) && !defined(__clang__)
+#if __GNUC__ != 10
 HIDDEN unw_dyn_info_list_t _U_dyn_info_list;
+#endif
+#endif
 
 PROTECTED unw_word_t
 _U_dyn_info_list_addr (void)

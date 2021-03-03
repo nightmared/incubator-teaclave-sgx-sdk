@@ -18,12 +18,13 @@
 enclave {
     include "sgx_eid.h"
     from "sgx_tstd.edl" import *;
-    from "attestation/attestation.edl" import *;
+    from "sgx_stdio.edl" import *;
+    from "sgx_backtrace.edl" import *;
+    from "sgx_tstdc.edl" import *;
+    //from "attestation/attestation.edl" import *;
     trusted{
-            public void test_enclave_init();
-            public uint32_t test_create_session(sgx_enclave_id_t src_enclave_id, sgx_enclave_id_t dest_enclave_id);
-            public uint32_t test_close_session(sgx_enclave_id_t src_enclave_id, sgx_enclave_id_t dest_enclave_id);
-            public uint32_t spectre_enclave();
+            public uint64_t spectre_enclave();
+            public void spectre_test(uint64_t measurement_array_addr, uint64_t target_addr);
     };
 
 };

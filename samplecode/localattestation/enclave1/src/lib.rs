@@ -17,21 +17,27 @@
 
 #![crate_name = "enclave1"]
 #![crate_type = "staticlib"]
-
 #![cfg_attr(not(target_env = "sgx"), no_std)]
 #![cfg_attr(target_env = "sgx", feature(rustc_private))]
 
 extern crate sgx_types;
 use sgx_types::*;
 
+#[cfg(not(target_env = "sgx"))]
+extern crate sgx_tstd as std;
+
+#[cfg(not(target_env = "sgx"))]
+extern crate minidow;
+
 extern crate attestation;
-use attestation::types::*;
 use attestation::err::*;
 use attestation::func::*;
+use attestation::types::*;
 
-fn verify_peer_enclave_trust(peer_enclave_identity: &sgx_dh_session_enclave_identity_t )-> u32 {
-
-    if peer_enclave_identity.isv_prod_id != 0 || peer_enclave_identity.attributes.flags & SGX_FLAGS_INITTED == 0 {
+fn verify_peer_enclave_trust(peer_enclave_identity: &sgx_dh_session_enclave_identity_t) -> u32 {
+    if peer_enclave_identity.isv_prod_id != 0
+        || peer_enclave_identity.attributes.flags & SGX_FLAGS_INITTED == 0
+    {
         // || peer_enclave_identity->attributes.xfrm !=3)// || peer_enclave_identity->mr_signer != xx //TODO: To be hardcoded with values to check
         ATTESTATION_STATUS::ENCLAVE_TRUST_ERROR as u32
     } else {
@@ -41,19 +47,36 @@ fn verify_peer_enclave_trust(peer_enclave_identity: &sgx_dh_session_enclave_iden
 
 #[no_mangle]
 pub extern "C" fn test_enclave_init() {
-    let cb = Callback{
+    let cb = Callback {
         verify: verify_peer_enclave_trust,
     };
     init(cb);
 }
 
 #[no_mangle]
-pub extern "C" fn test_create_session(src_enclave_id: sgx_enclave_id_t, dest_enclave_id: sgx_enclave_id_t) -> u32 {
+pub extern "C" fn test_create_session(
+    src_enclave_id: sgx_enclave_id_t,
+    dest_enclave_id: sgx_enclave_id_t,
+) -> u32 {
     create_session(src_enclave_id, dest_enclave_id) as u32
 }
 
 #[no_mangle]
 #[allow(unused_variables)]
-pub extern "C" fn test_close_session(src_enclave_id: sgx_enclave_id_t, dest_enclave_id: sgx_enclave_id_t) -> u32 {
+pub extern "C" fn test_close_session(
+    src_enclave_id: sgx_enclave_id_t,
+    dest_enclave_id: sgx_enclave_id_t,
+) -> u32 {
     close_session(src_enclave_id, dest_enclave_id) as u32
+}
+
+#[no_mangle]
+pub extern "C" fn spectre_enclave() -> u32 {
+    use minidow::setup_measurements;
+
+    setup_measurements();
+
+    #[cfg(not(target_env = "sgx"))]
+    std::println!("test");
+    return 1;
 }

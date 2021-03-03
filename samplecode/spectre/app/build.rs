@@ -13,17 +13,24 @@
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
-// under the License.
+// under the License..
 
-enclave {
-    include "sgx_eid.h"
-    from "sgx_tstd.edl" import *;
-    from "attestation/attestation.edl" import *;
-    trusted{
-            public void test_enclave_init();
-            public uint32_t test_create_session(sgx_enclave_id_t src_enclave_id, sgx_enclave_id_t dest_enclave_id);
-            public uint32_t test_close_session(sgx_enclave_id_t src_enclave_id, sgx_enclave_id_t dest_enclave_id);
-            public uint32_t spectre_enclave();
-    };
+use std::env;
 
-};
+fn main () {
+
+    let sdk_dir = env::var("SGX_SDK")
+                    .unwrap_or_else(|_| "/opt/sgxsdk".to_string());
+    let is_sim = env::var("SGX_MODE")
+                    .unwrap_or_else(|_| "HW".to_string());
+
+    println!("cargo:rustc-link-search=native=../lib");
+    println!("cargo:rustc-link-lib=static=Enclave_u");
+
+    println!("cargo:rustc-link-search=native={}/lib64", sdk_dir);
+    match is_sim.as_ref() {
+        "SW" => println!("cargo:rustc-link-lib=dylib=sgx_urts_sim"),
+        "HW" => println!("cargo:rustc-link-lib=dylib=sgx_urts"),
+        _    => println!("cargo:rustc-link-lib=dylib=sgx_urts"), // Treat undefined as HW
+    }
+}

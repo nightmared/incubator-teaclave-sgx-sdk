@@ -97,7 +97,9 @@ int _tmain(int argc, _TCHAR* argv[])
     {
         printf("\nLoad Enclave Failure");
     }
-
+    printf("%d\n", Enclave1_spectre_enclave(e1_enclave_id, &ret_status));
+    printf("%d\n", ret_status);
+    /*
     do
     {
         Enclave1_test_enclave_init(e1_enclave_id);
@@ -265,6 +267,7 @@ int _tmain(int argc, _TCHAR* argv[])
 #pragma warning (disable : 4127)
     }while(0);
 #pragma warning (pop)
+        */
 
     sgx_destroy_enclave(e1_enclave_id);
     sgx_destroy_enclave(e2_enclave_id);

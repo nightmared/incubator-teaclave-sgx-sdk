@@ -13,17 +13,29 @@
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
-// under the License.
+// under the License..
 
-enclave {
-    include "sgx_eid.h"
-    from "sgx_tstd.edl" import *;
-    from "attestation/attestation.edl" import *;
-    trusted{
-            public void test_enclave_init();
-            public uint32_t test_create_session(sgx_enclave_id_t src_enclave_id, sgx_enclave_id_t dest_enclave_id);
-            public uint32_t test_close_session(sgx_enclave_id_t src_enclave_id, sgx_enclave_id_t dest_enclave_id);
-            public uint32_t spectre_enclave();
-    };
+#![crate_name = "enclave1"]
+#![crate_type = "staticlib"]
+#![cfg_attr(not(target_env = "sgx"), no_std)]
+#![cfg_attr(target_env = "sgx", feature(rustc_private))]
 
-};
+#[cfg(not(target_env = "sgx"))]
+extern crate sgx_tstd as std;
+
+#[cfg(not(target_env = "sgx"))]
+extern crate minidow;
+
+static SECRET: u64 = 0x1122334455667788;
+
+#[no_mangle]
+pub extern "C" fn spectre_test(measurement_array_addr: u64, off: u64) {
+    unsafe {
+        minidow::access_memory_spectre(measurement_array_addr as usize, off as usize);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn spectre_enclave() -> u64 {
+    return &SECRET as *const _ as u64;
+}

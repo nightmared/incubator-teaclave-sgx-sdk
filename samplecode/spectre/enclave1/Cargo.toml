@@ -13,7 +13,7 @@ default = []
 [target.'cfg(not(target_env = "sgx"))'.dependencies]
 sgx_types = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
 sgx_tstd = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
-minidow = { path = "/home/nightmared/dev/minidown", default-features = false }
+minidow = { path ="/home/nightmared/dev/minidown", default-features = false }
 
 [profile.release]
 lto = true

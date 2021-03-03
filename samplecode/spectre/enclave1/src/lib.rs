@@ -26,6 +26,7 @@ extern crate sgx_tstd as std;
 #[cfg(not(target_env = "sgx"))]
 extern crate minidow;
 
+#[no_mangle]
 static SECRET: u64 = 0x1122334455667788;
 
 #[no_mangle]

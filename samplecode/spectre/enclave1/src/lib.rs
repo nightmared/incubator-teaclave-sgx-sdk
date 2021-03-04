@@ -33,6 +33,17 @@ static SECRET: u64 = 0x1122334455667788;
 
 #[no_mangle]
 pub extern "C" fn spectre_test(measurement_array_addr: u64, off: u64) {
+    //unsafe {
+    //    std::ptr::read_volatile(
+    //        (measurement_array_addr + 15 * minidow::MULTIPLE_OFFSET as u64) as *mut u8,
+    //    );
+    //}
+    #[cfg(not(target_env = "sgx"))]
+    std::println!(
+        "{:p}, 0x{:x}",
+        &minidow::MINIDOW_SECRET[64] as *const _ as *const u8,
+        off
+    );
     unsafe {
         minidow::access_memory_spectre(measurement_array_addr as usize, off as usize);
     }
@@ -41,6 +52,8 @@ pub extern "C" fn spectre_test(measurement_array_addr: u64, off: u64) {
 #[no_mangle]
 pub extern "C" fn spectre_enclave() -> u64 {
     #[cfg(not(target_env = "sgx"))]
-    std::println!("{:p}", minidow::MINIDOW_SECRET as *const u8);
+    unsafe {
+        std::println!("{:p}", minidow::MINIDOW_SECRET as *const _ as *const u8);
+    }
     return &SECRET as *const _ as u64;
 }

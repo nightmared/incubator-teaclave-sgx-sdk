@@ -26,6 +26,8 @@ extern crate sgx_tstd as std;
 #[cfg(not(target_env = "sgx"))]
 extern crate minidow;
 
+pub use minidow::MINIDOW_SECRET;
+
 #[no_mangle]
 static SECRET: u64 = 0x1122334455667788;
 
@@ -38,5 +40,7 @@ pub extern "C" fn spectre_test(measurement_array_addr: u64, off: u64) {
 
 #[no_mangle]
 pub extern "C" fn spectre_enclave() -> u64 {
+    #[cfg(not(target_env = "sgx"))]
+    std::println!("{:p}", minidow::MINIDOW_SECRET as *const u8);
     return &SECRET as *const _ as u64;
 }

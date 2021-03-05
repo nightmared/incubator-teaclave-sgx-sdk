@@ -75,7 +75,7 @@ else
 	Urts_Library_Name := sgx_urts
 endif
 
-App_Rust_Mode = debug
+App_Rust_Mode = release
 
 ifeq (${App_Rust_Mode}, release)
 	App_Rust_Flags := --release

@@ -29,8 +29,6 @@ extern crate minidow;
 #[cfg(not(target_env = "sgx"))]
 pub use minidow::MINIDOW_SECRET;
 
-static mut SEALING_KEY: sgx_key_128bit_t = [0; 16];
-
 extern crate sgx_types;
 use sgx_types::{
     sgx_get_key, sgx_key_128bit_t, sgx_key_request_t, sgx_report_t, sgx_self_report, sgx_status_t,
@@ -63,7 +61,12 @@ pub unsafe extern "C" fn spectre_enclave() -> u64 {
     key_req.attribute_mask.xfrm = 0;
     key_req.misc_mask = TSEAL_DEFAULT_MISCMASK;
 
-    let success = sgx_get_key(&key_req as *const _, &mut SEALING_KEY as *mut _);
+    // make sure the key is not overwritten later (as is we were called farily deeply in the call
+    // stack
+    let _arr = [127u8; 256];
+
+    let mut key = sgx_key_128bit_t::default();
+    let success = sgx_get_key(&key_req as *const _, &mut key as *mut _);
     if success != sgx_status_t::SGX_SUCCESS {
         #[cfg(not(target_env = "sgx"))]
         std::println!("couldn't get the key !");
@@ -72,10 +75,10 @@ pub unsafe extern "C" fn spectre_enclave() -> u64 {
     #[cfg(not(target_env = "sgx"))]
     std::println!(
         "0x{:x}",
-        core::mem::transmute::<sgx_key_128bit_t, u128>(SEALING_KEY)
+        core::mem::transmute::<sgx_key_128bit_t, u128>(key)
     );
 
-    return &SEALING_KEY as *const _ as u64;
+    return &key as *const _ as u64;
 }
 
 #[no_mangle]

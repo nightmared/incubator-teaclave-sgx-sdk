@@ -26,8 +26,18 @@ extern crate sgx_tstd as std;
 
 #[cfg(not(target_env = "sgx"))]
 extern crate minidow;
-
+#[cfg(not(target_env = "sgx"))]
 pub use minidow::MINIDOW_SECRET;
+
+static mut SEALING_KEY: sgx_key_128bit_t = [0; 16];
+
+extern crate sgx_types;
+use sgx_types::{
+    sgx_get_key, sgx_key_128bit_t, sgx_key_request_t, sgx_report_t, sgx_self_report, sgx_status_t,
+    SGX_KEYPOLICY_MRSIGNER, SGX_KEYSELECT_SEAL, TSEAL_DEFAULT_FLAGSMASK, TSEAL_DEFAULT_MISCMASK,
+};
+
+extern crate sgx_rand;
 
 #[no_mangle]
 static SECRET: u64 = 0x1122334455667788;
@@ -38,10 +48,37 @@ pub unsafe extern "C" fn spectre_test(measurement_array_addr: u64, off: u64) {
 }
 
 #[no_mangle]
-pub extern "C" fn spectre_enclave() -> u64 {
+pub unsafe extern "C" fn spectre_enclave() -> u64 {
+    let rand = sgx_rand::random::<[u8; 32]>();
+    let report = sgx_self_report();
+
+    let mut key_req = sgx_key_request_t::default();
+    key_req.key_id = core::mem::transmute(rand);
+    key_req.cpu_svn = (*report).body.cpu_svn;
+    key_req.cpu_svn = (*report).body.cpu_svn;
+    key_req.config_svn = (*report).body.config_svn;
+    key_req.key_name = SGX_KEYSELECT_SEAL;
+    key_req.key_policy = SGX_KEYPOLICY_MRSIGNER;
+    key_req.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
+    key_req.attribute_mask.xfrm = 0;
+    key_req.misc_mask = TSEAL_DEFAULT_MISCMASK;
+
+    let success = sgx_get_key(&key_req as *const _, &mut SEALING_KEY as *mut _);
+    if success != sgx_status_t::SGX_SUCCESS {
+        #[cfg(not(target_env = "sgx"))]
+        std::println!("couldn't get the key !");
+    }
+
     #[cfg(not(target_env = "sgx"))]
-    std::println!("{:p}", unsafe {
-        &minidow::SPECTRE_LIMIT as *const _ as *const u8
-    });
+    std::println!(
+        "0x{:x}",
+        core::mem::transmute::<sgx_key_128bit_t, u128>(SEALING_KEY)
+    );
+
+    return &SEALING_KEY as *const _ as u64;
+}
+
+#[no_mangle]
+pub extern "C" fn get_secret_addr() -> u64 {
     return &SECRET as *const _ as u64;
 }

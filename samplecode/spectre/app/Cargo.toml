@@ -7,7 +7,7 @@ build = "build.rs"
 [dependencies]
 sgx_types = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
 sgx_urts = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
-minidow = { git = "https://github.com/nightmared/minidow", default-features = false, features= ["tester"] }
+minidow = { git = "https://github.com/nightmared/minidow.git", default-features = false, features= ["tester"] }
 capstone = "0.7"
 capstone-sys = "0.11"
 goblin = "0.3"

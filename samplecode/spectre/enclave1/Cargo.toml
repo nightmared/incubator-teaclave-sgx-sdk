@@ -14,7 +14,7 @@ default = []
 sgx_types = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
 sgx_tstd = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
 sgx_rand = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
-minidow = { path ="/home/nightmared/dev/minidown", default-features = false }
+minidow = { git = "https://github.com/nightmared/minidow.git", default-features = false }
 
 [profile.release]
 lto = true

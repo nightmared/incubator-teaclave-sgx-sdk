@@ -7,13 +7,14 @@ build = "build.rs"
 [dependencies]
 sgx_types = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
 sgx_urts = { git = "https://github.com/apache/teaclave-sgx-sdk.git" }
-minidow = { path = "/home/nightmared/dev/minidown", default-features = false, features= ["tester"] }
+minidow = { git = "https://github.com/nightmared/minidow", default-features = false, features= ["tester"] }
 capstone = "0.7"
 capstone-sys = "0.11"
 goblin = "0.3"
 nix = "0.20"
 libc = "0.2"
 aes-gcm = "0.8.0"
+termcolor = "1.1.2"
 
 [features]
 default = ["multithread"]

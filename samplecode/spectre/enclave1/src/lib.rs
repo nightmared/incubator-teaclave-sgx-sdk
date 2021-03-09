@@ -31,12 +31,15 @@ pub use minidow::MINIDOW_SECRET;
 
 extern crate sgx_types;
 use sgx_types::{
-    sgx_get_key, sgx_key_128bit_t, sgx_key_request_t, sgx_report_t, sgx_self_report, sgx_status_t,
-    SGX_KEYPOLICY_MRSIGNER, SGX_KEYSELECT_SEAL, TSEAL_DEFAULT_FLAGSMASK, TSEAL_DEFAULT_MISCMASK,
+    sgx_aes_gcm_128bit_tag_t, sgx_get_key, sgx_key_128bit_t, sgx_key_id_t, sgx_key_request_t,
+    sgx_rijndael128GCM_decrypt, sgx_rijndael128GCM_encrypt, sgx_self_report, sgx_status_t,
+    SGX_KEYPOLICY_MRSIGNER, SGX_KEYSELECT_SEAL, SGX_SEAL_IV_SIZE, TSEAL_DEFAULT_FLAGSMASK,
+    TSEAL_DEFAULT_MISCMASK,
 };
 
 extern crate sgx_rand;
 
+static mut PRIVATE_KEY: sgx_key_128bit_t = [0; 16];
 #[no_mangle]
 static SECRET: u64 = 0x1122334455667788;
 
@@ -46,12 +49,23 @@ pub unsafe extern "C" fn spectre_test(measurement_array_addr: u64, off: u64) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn spectre_enclave() -> u64 {
-    let rand = sgx_rand::random::<[u8; 32]>();
+pub unsafe extern "C" fn get_key_addr() -> *const sgx_key_128bit_t {
+    &PRIVATE_KEY as *const _
+}
+
+pub unsafe fn get_seal_key() -> (sgx_key_id_t, *const sgx_key_128bit_t) {
+    let rand = sgx_rand::random::<[u8; core::mem::size_of::<sgx_key_id_t>()]>();
+
+    let key_id = sgx_key_id_t { id: rand };
+
+    return (key_id, get_seal_key_from_key_id(key_id.clone()));
+}
+
+pub unsafe fn get_seal_key_from_key_id(key_id: sgx_key_id_t) -> *const sgx_key_128bit_t {
     let report = sgx_self_report();
 
     let mut key_req = sgx_key_request_t::default();
-    key_req.key_id = core::mem::transmute(rand);
+    key_req.key_id = key_id;
     key_req.cpu_svn = (*report).body.cpu_svn;
     key_req.cpu_svn = (*report).body.cpu_svn;
     key_req.config_svn = (*report).body.config_svn;
@@ -61,24 +75,89 @@ pub unsafe extern "C" fn spectre_enclave() -> u64 {
     key_req.attribute_mask.xfrm = 0;
     key_req.misc_mask = TSEAL_DEFAULT_MISCMASK;
 
-    // make sure the key is not overwritten later (as is we were called farily deeply in the call
-    // stack
-    let _arr = [127u8; 256];
-
-    let mut key = sgx_key_128bit_t::default();
-    let success = sgx_get_key(&key_req as *const _, &mut key as *mut _);
+    let success = sgx_get_key(&key_req as *const _, &mut PRIVATE_KEY as *mut _);
     if success != sgx_status_t::SGX_SUCCESS {
         #[cfg(not(target_env = "sgx"))]
-        std::println!("couldn't get the key !");
+        std::println!("[enclave] couldn't get a key!");
     }
 
     #[cfg(not(target_env = "sgx"))]
     std::println!(
-        "0x{:x}",
-        core::mem::transmute::<sgx_key_128bit_t, u128>(key)
+        "[enclave] Private key value: 0x{:x}",
+        core::mem::transmute::<sgx_key_128bit_t, u128>(PRIVATE_KEY)
     );
 
-    return &key as *const _ as u64;
+    return &PRIVATE_KEY as *const _;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn custom_seal_data(
+    buf: *const u8,
+    buf_size: u32,
+    out_buf: *mut u8,
+    out_size: *mut u32,
+    out_tag: *mut sgx_aes_gcm_128bit_tag_t,
+) -> sgx_status_t {
+    let (key_id, key) = get_seal_key();
+
+    #[cfg(not(target_env = "sgx"))]
+    std::println!("[enclave] key_id in seal: {:?}", key_id.id);
+
+    let additional_data = &key_id.id[0] as *const u8;
+    let additional_data_len = core::mem::size_of::<sgx_key_id_t>() as u32;
+
+    *out_size = (buf_size as usize + additional_data_len as usize) as u32;
+
+    let status = sgx_rijndael128GCM_encrypt(
+        key,
+        buf,
+        buf_size,
+        out_buf,
+        &[0u8; SGX_SEAL_IV_SIZE] as *const u8,
+        SGX_SEAL_IV_SIZE as u32,
+        additional_data,
+        additional_data_len,
+        out_tag,
+    );
+
+    core::ptr::copy(
+        additional_data,
+        (out_buf as usize + buf_size as usize) as *mut u8,
+        additional_data_len as usize,
+    );
+
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn custom_unseal_data(
+    buf: *const u8,
+    buf_size: u32,
+    out_buf: *mut u8,
+    tag: *const sgx_aes_gcm_128bit_tag_t,
+) -> sgx_status_t {
+    let key_id = (buf as usize + buf_size as usize) as *const sgx_key_id_t;
+
+    #[cfg(not(target_env = "sgx"))]
+    std::println!("[enclave] tag: {:?}", *tag);
+
+    #[cfg(not(target_env = "sgx"))]
+    std::println!("[enclave] key_id in unseal: {:?}", (*key_id).id);
+    let key = get_seal_key_from_key_id(*key_id);
+
+    let status = sgx_rijndael128GCM_decrypt(
+        key,
+        buf,
+        buf_size,
+        out_buf,
+        &[0_u8; SGX_SEAL_IV_SIZE] as *const u8,
+        SGX_SEAL_IV_SIZE as u32,
+        &(*key_id).id[0] as *const u8,
+        core::mem::size_of::<sgx_key_id_t>() as u32,
+        tag,
+    );
+
+    status
 }
 
 #[no_mangle]

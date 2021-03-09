@@ -24,7 +24,9 @@ enclave {
     //from "attestation/attestation.edl" import *;
     trusted{
             public uint64_t get_secret_addr();
-            public uint64_t spectre_enclave();
+            public uint64_t get_key_addr();
+            public sgx_status_t custom_seal_data([user_check] uint8_t *buf, uint32_t buf_size, [user_check] uint8_t *out_buf, [user_check] uint32_t *out_size, [user_check] uint8_t *out_tag);
+            public sgx_status_t custom_unseal_data([user_check] uint8_t *buf, uint32_t buf_size, [user_check] uint8_t *out_buf, [user_check] uint8_t *tag);
             public void spectre_test(uint64_t measurement_array_addr, uint64_t target_addr);
     };
 

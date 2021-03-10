@@ -33,7 +33,7 @@ extern crate sgx_types;
 use sgx_types::{
     sgx_aes_gcm_128bit_tag_t, sgx_get_key, sgx_key_128bit_t, sgx_key_id_t, sgx_key_request_t,
     sgx_rijndael128GCM_decrypt, sgx_rijndael128GCM_encrypt, sgx_self_report, sgx_status_t,
-    SGX_KEYPOLICY_MRSIGNER, SGX_KEYSELECT_SEAL, SGX_SEAL_IV_SIZE, TSEAL_DEFAULT_FLAGSMASK,
+    SGX_KEYPOLICY_MRENCLAVE, SGX_KEYSELECT_SEAL, SGX_SEAL_IV_SIZE, TSEAL_DEFAULT_FLAGSMASK,
     TSEAL_DEFAULT_MISCMASK,
 };
 
@@ -70,7 +70,7 @@ pub unsafe fn get_seal_key_from_key_id(key_id: sgx_key_id_t) -> *const sgx_key_1
     key_req.cpu_svn = (*report).body.cpu_svn;
     key_req.config_svn = (*report).body.config_svn;
     key_req.key_name = SGX_KEYSELECT_SEAL;
-    key_req.key_policy = SGX_KEYPOLICY_MRSIGNER;
+    key_req.key_policy = SGX_KEYPOLICY_MRENCLAVE;
     key_req.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
     key_req.attribute_mask.xfrm = 0;
     key_req.misc_mask = TSEAL_DEFAULT_MISCMASK;
